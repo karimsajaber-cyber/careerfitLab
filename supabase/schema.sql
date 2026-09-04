@@ -23,6 +23,7 @@ create table if not exists public.applicant_profiles (
   target_role text,
   target_industry text,
   target_fields text,
+  target_fields_other text,
   english_level text,
   career_goal text,
   availability text,
