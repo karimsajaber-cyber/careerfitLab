@@ -3,3 +3,12 @@ dist
 .env
 .env.local
 .env.*.local
+supabase/.temp/
+tmp-semantic-openai-check.mjs
+phase1_diff.txt
+phase*_review_bundle.txt
+CAREERFIT_PROJECT_STATE.md
+PHASE_3_DEPLOYMENT_RUNBOOK.md
+supabase/application_draft_claim_diagnostics_review.sql
+supabase/application_test_data_cleanup_review.sql
+supabase/password_security_phase_1_review.md

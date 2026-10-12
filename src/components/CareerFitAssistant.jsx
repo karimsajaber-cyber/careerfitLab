@@ -1,9 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { careerFitAssistantContent } from "../data/careerFitAssistantContent";
+import { getUserSupabase } from "../lib/supabase";
+import { useUserAuth } from "./UserAuthProvider";
 
 const initialMessages = [{ type: "assistant", id: "welcome" }];
 const guideOrder = ["situation", "challenge", "target"];
 const primaryActionIds = ["fit", "apply", "gain"];
+const MAX_AI_HISTORY_MESSAGES = 6;
+const MAX_AI_HISTORY_CONTENT_LENGTH = 1000;
 let assistantWasOpen = false;
 
 const normalizeIntentText = (value) => value
@@ -22,18 +26,77 @@ const matchIntent = (value, content) => {
   ))?.id || null;
 };
 
-export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChange }) {
+export default function CareerFitAssistant({
+  language = "ar",
+  isOpen,
+  onOpenChange,
+  aiEnabled = false,
+  isAuthenticated = false,
+  onAuthenticationRequired,
+  getAuthClient = getUserSupabase,
+  sessionUserId,
+}) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const [messages, setMessages] = useState(initialMessages);
   const [draft, setDraft] = useState("");
   const [hasInteracted, setHasInteracted] = useState(false);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isAiPending, setIsAiPending] = useState(false);
+  const [aiAccessUnavailable, setAiAccessUnavailable] = useState(false);
+  const [remainingMessages, setRemainingMessages] = useState(null);
+  const [aiAccessRequestStatus, setAiAccessRequestStatus] = useState(null);
+  const [isAiAccessRequestLoading, setIsAiAccessRequestLoading] = useState(false);
+  const [isAiAccessRequestSubmitting, setIsAiAccessRequestSubmitting] = useState(false);
+  const [aiAccessRequestError, setAiAccessRequestError] = useState("");
+  const [aiAccessRequestSubmitted, setAiAccessRequestSubmitted] = useState(false);
+  const [conversationOwnerUserId, setConversationOwnerUserId] = useState(null);
   const content = careerFitAssistantContent[language] || careerFitAssistantContent.ar;
+  const { user: authenticatedUser, requestAuthentication, consumeAiAuthRequestOrigin, signOut } = useUserAuth();
+  const [signOutError, setSignOutError] = useState("");
   const panelId = useId();
   const launcherRef = useRef(null);
   const messagesRef = useRef(null);
+  const aiHistoryRef = useRef([]);
+  const aiRequestIdRef = useRef(0);
+  const isAiPendingRef = useRef(false);
   const isArabic = language === "ar";
+  const authenticatedUserId = sessionUserId ?? authenticatedUser?.id ?? null;
+  const isConversationForCurrentUser = conversationOwnerUserId === authenticatedUserId;
+  const visibleMessages = isConversationForCurrentUser ? messages : initialMessages;
+  const visibleDraft = isConversationForCurrentUser ? draft : "";
+  const hasVisibleInteraction = isConversationForCurrentUser && hasInteracted;
+  const hasAuthenticatedSession = isAuthenticated || Boolean(authenticatedUserId);
+  const requestUserAuthentication = onAuthenticationRequired || (() => requestAuthentication(language, "assistant"));
+  const authCopy = isArabic
+    ? {
+      sessionRequired: "تحقق من بريدك الإلكتروني للمتابعة.",
+      accessUnavailable: "الوصول إلى مساعد الذكاء الاصطناعي غير متاح لحسابك حالياً.",
+      testingNotice: "الوصول إلى المساعد محدود خلال الاختبار. اطرح أسئلة واضحة ومركزة للاستفادة من رسائلك المتاحة.",
+      remaining: (count) => `الرسائل المتبقية: ${count}`,
+      signOut: "تسجيل الخروج",
+      signOutError: "تعذر تسجيل الخروج حالياً. حاول مرة أخرى.",
+      requestAccess: "اطلب الوصول إلى مساعد الذكاء الاصطناعي",
+      requestSubmitting: "جارٍ إرسال الطلب...",
+      requestPending: "طلب الوصول الخاص بك قيد المراجعة.",
+      requestSubmitted: "تم إرسال طلب الوصول إلى المساعد الذكي. طلبك قيد المراجعة.",
+      requestRejected: "لم تتم الموافقة على طلب الوصول السابق.",
+      requestError: "تعذر إرسال طلب الوصول حالياً. حاول مرة أخرى.",
+    }
+    : {
+      sessionRequired: "Verify your email to continue.",
+      accessUnavailable: "AI access is currently unavailable for your account.",
+      testingNotice: "AI access is limited during testing. Ask clear, focused questions to make the most of your available messages.",
+      remaining: (count) => `${count} questions remaining`,
+      signOut: "Sign out",
+      signOutError: "Unable to sign out right now. Please try again.",
+      requestAccess: "Request AI Access",
+      requestSubmitting: "Sending request...",
+      requestPending: "Your access request is pending approval.",
+      requestSubmitted: "Your AI access request has been submitted and is pending review.",
+      requestRejected: "Your previous access request was not approved.",
+      requestError: "Unable to send your access request right now. Please try again.",
+    };
   const panelIsOpen = (typeof isOpen === "boolean" ? isOpen : uncontrolledOpen) || assistantWasOpen;
   const setPanelOpen = onOpenChange || setUncontrolledOpen;
 
@@ -42,16 +105,131 @@ export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChan
       const latestMessage = messagesRef.current.lastElementChild;
       messagesRef.current.scrollTop = latestMessage ? latestMessage.offsetTop : 0;
     }
-  }, [panelIsOpen, messages]);
+  }, [panelIsOpen, messages, isAiPending]);
 
   useEffect(() => () => {
+    aiRequestIdRef.current += 1;
+    isAiPendingRef.current = false;
     if (assistantWasOpen) {
       window.sessionStorage.setItem("careerfit-assistant-restore-open", "true");
     }
   }, []);
 
+  useEffect(() => {
+    aiHistoryRef.current = [];
+    aiRequestIdRef.current += 1;
+    isAiPendingRef.current = false;
+    setIsAiPending(false);
+    setAiAccessUnavailable(false);
+    setRemainingMessages(null);
+    setAiAccessRequestStatus(null);
+    setIsAiAccessRequestLoading(false);
+    setIsAiAccessRequestSubmitting(false);
+    setAiAccessRequestError("");
+    setAiAccessRequestSubmitted(false);
+    setMessages(initialMessages);
+    setDraft("");
+    setHasInteracted(false);
+    setSuggestionsOpen(false);
+    setIsExpanded(false);
+    setSignOutError("");
+    setConversationOwnerUserId(authenticatedUserId);
+  }, [authenticatedUserId]);
+
+  useEffect(() => {
+    if (aiEnabled || !authenticatedUser?.id) {
+      setAiAccessRequestStatus(null);
+      setIsAiAccessRequestLoading(false);
+      return undefined;
+    }
+
+    let isActive = true;
+    const loadAccessRequest = async () => {
+      setIsAiAccessRequestLoading(true);
+      setAiAccessRequestError("");
+
+      try {
+        const userSupabase = getUserSupabase();
+        if (!userSupabase) return;
+
+        const { data, error } = await userSupabase.rpc("get_my_ai_access_request");
+        if (error || !isActive) return;
+
+        const request = Array.isArray(data) ? data[0] : data;
+        const requestStatus = typeof request?.status === "string" ? request.status : null;
+        setAiAccessRequestStatus(requestStatus);
+
+        const hasExistingAccess = requestStatus === "approved" || requestStatus === "granted";
+        if (!consumeAiAuthRequestOrigin() || requestStatus === "pending" || hasExistingAccess) return;
+
+        setIsAiAccessRequestSubmitting(true);
+        try {
+          const { data: submittedData, error: submitError } = await userSupabase.rpc("request_ai_access", {
+            p_request_note: null,
+          });
+          if (submitError) throw submitError;
+          if (!isActive) return;
+
+          const submittedRequest = Array.isArray(submittedData) ? submittedData[0] : submittedData;
+          setAiAccessRequestStatus(typeof submittedRequest?.status === "string" ? submittedRequest.status : "pending");
+          setAiAccessRequestSubmitted(true);
+        } catch {
+          if (isActive) setAiAccessRequestError(authCopy.requestError);
+        } finally {
+          if (isActive) setIsAiAccessRequestSubmitting(false);
+        }
+      } finally {
+        if (isActive) setIsAiAccessRequestLoading(false);
+      }
+    };
+
+    loadAccessRequest();
+    return () => {
+      isActive = false;
+    };
+  }, [aiEnabled, authenticatedUser?.id]);
+
+  const resetAiConversation = () => {
+    aiHistoryRef.current = [];
+    aiRequestIdRef.current += 1;
+    isAiPendingRef.current = false;
+    setIsAiPending(false);
+  };
+
+  const handleUserSignOut = async () => {
+    setSignOutError("");
+    const didSignOut = await signOut();
+    if (!didSignOut) setSignOutError(authCopy.signOutError);
+  };
+
+  const requestAiAccess = async () => {
+    if (aiEnabled || !authenticatedUser?.id || isAiAccessRequestSubmitting || aiAccessRequestStatus === "pending") {
+      return;
+    }
+
+    setAiAccessRequestError("");
+    setIsAiAccessRequestSubmitting(true);
+
+    try {
+      const userSupabase = getUserSupabase();
+      if (!userSupabase) throw new Error("Supabase is not configured");
+
+      const { data, error } = await userSupabase.rpc("request_ai_access", { p_request_note: null });
+      if (error) throw error;
+
+      const request = Array.isArray(data) ? data[0] : data;
+      setAiAccessRequestStatus(typeof request?.status === "string" ? request.status : "pending");
+      setAiAccessRequestSubmitted(true);
+    } catch {
+      setAiAccessRequestError(authCopy.requestError);
+    } finally {
+      setIsAiAccessRequestSubmitting(false);
+    }
+  };
+
   const closeAssistant = () => {
     assistantWasOpen = false;
+    resetAiConversation();
     setMessages(initialMessages);
     setHasInteracted(false);
     setSuggestionsOpen(false);
@@ -67,6 +245,7 @@ export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChan
     }
 
     setMessages(initialMessages);
+    resetAiConversation();
     setHasInteracted(false);
     setSuggestionsOpen(false);
     setIsExpanded(false);
@@ -140,21 +319,136 @@ export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChan
     ]);
   };
 
-  const handleSubmit = (event) => {
-    event.preventDefault();
-    const text = draft.trim();
-    if (!text) return;
-
+  const appendDeterministicReply = (text, includeVisitor = true) => {
     const intent = matchIntent(text, content);
     const response = intent ? responseForAction(intent, text) : { type: "assistant", id: "fallback" };
+
     setMessages((currentMessages) => [
       ...currentMessages,
-      { type: "visitor-text", text },
+      ...(includeVisitor ? [{ type: "visitor-text", text }] : []),
       response,
     ]);
+  };
+
+  const addAiHistoryMessage = (role, text) => {
+    const contentText = text.trim().slice(0, MAX_AI_HISTORY_CONTENT_LENGTH);
+    if (!contentText) return;
+
+    aiHistoryRef.current = [
+      ...aiHistoryRef.current,
+      { role, content: contentText },
+    ].slice(-MAX_AI_HISTORY_MESSAGES);
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || isAiPendingRef.current) return;
+
+    if (!aiEnabled && !hasAuthenticatedSession && requestUserAuthentication) {
+      requestUserAuthentication();
+      return;
+    }
+
     setDraft("");
     setHasInteracted(true);
     setSuggestionsOpen(false);
+
+    if (!aiEnabled && !hasAuthenticatedSession) {
+      appendDeterministicReply(text);
+      return;
+    }
+
+    if (aiAccessUnavailable) {
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        { type: "visitor-text", text },
+        { type: "assistant-text", text: authCopy.accessUnavailable },
+      ]);
+      return;
+    }
+
+    if (!aiEnabled && aiAccessRequestStatus === "pending") {
+      setMessages((currentMessages) => [
+        ...currentMessages,
+        { type: "visitor-text", text },
+        { type: "assistant-text", text: authCopy.requestPending },
+      ]);
+      return;
+    }
+
+    const authClient = getAuthClient();
+    if (!authClient) {
+      appendDeterministicReply(text);
+      return;
+    }
+
+    const { data: sessionData } = await authClient.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+    if (!accessToken) {
+      setDraft(text);
+      requestUserAuthentication?.();
+      return;
+    }
+
+    setMessages((currentMessages) => [...currentMessages, { type: "visitor-text", text }]);
+    setConversationOwnerUserId(authenticatedUserId);
+    const requestId = aiRequestIdRef.current + 1;
+    aiRequestIdRef.current = requestId;
+    isAiPendingRef.current = true;
+    setIsAiPending(true);
+
+    try {
+      const { data, error } = await authClient.functions.invoke("careerfit-assistant", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        body: {
+          message: text,
+          language,
+          history: aiHistoryRef.current.slice(-MAX_AI_HISTORY_MESSAGES),
+        },
+      });
+      const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
+      const responseStatus = error?.context?.status;
+      const responseError = typeof data?.error === "string" ? data.error : "";
+
+      if (responseStatus === 401 || responseError === "unauthorized") {
+        if (requestId === aiRequestIdRef.current) {
+          setMessages((currentMessages) => [
+            ...currentMessages,
+            { type: "assistant-text", text: authCopy.sessionRequired },
+          ]);
+          requestUserAuthentication?.();
+        }
+        return;
+      }
+
+      if (responseStatus === 403 || responseError === "ai_access_unavailable") {
+        if (requestId === aiRequestIdRef.current) {
+          setAiAccessUnavailable(true);
+          setMessages((currentMessages) => [
+            ...currentMessages,
+            { type: "assistant-text", text: authCopy.accessUnavailable },
+          ]);
+        }
+        return;
+      }
+
+      if (error || data?.ok !== true || !reply) throw new Error("AI response unavailable");
+      if (requestId !== aiRequestIdRef.current) return;
+
+      setMessages((currentMessages) => [...currentMessages, { type: "assistant-text", text: reply }]);
+      addAiHistoryMessage("user", text);
+      addAiHistoryMessage("assistant", reply);
+      setAiAccessUnavailable(false);
+      setRemainingMessages(typeof data.remainingMessages === "number" ? data.remainingMessages : null);
+    } catch {
+      if (requestId === aiRequestIdRef.current) appendDeterministicReply(text, false);
+    } finally {
+      if (requestId === aiRequestIdRef.current) {
+        isAiPendingRef.current = false;
+        setIsAiPending(false);
+      }
+    }
   };
 
   const renderCta = (cta) => (
@@ -247,6 +541,15 @@ export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChan
       );
     }
 
+    if (message.type === "assistant-text") {
+      return (
+        <article className="careerfit-assistant__message careerfit-assistant__message--assistant" key={`assistant-text-${index}`}>
+          <span className="careerfit-assistant__message-label">{content.assistantLabel}</span>
+          <p>{message.text}</p>
+        </article>
+      );
+    }
+
     if (message.type === "recommendation") {
       const recommendation = content.guide.recommendations[message.id];
       return (
@@ -292,7 +595,13 @@ export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChan
 
   const primaryActions = content.actions.filter((action) => primaryActionIds.includes(action.id));
   const secondaryActions = content.actions.filter((action) => !primaryActionIds.includes(action.id));
-  const visibleMenuActions = hasInteracted ? content.actions : secondaryActions;
+  const visibleMenuActions = hasVisibleInteraction ? content.actions : secondaryActions;
+  const showAiAccessRequest = !aiEnabled
+    && Boolean(authenticatedUser?.id)
+    && !isAiAccessRequestLoading
+    && aiAccessRequestStatus !== "pending"
+    && aiAccessRequestStatus !== "approved"
+    && aiAccessRequestStatus !== "granted";
 
   return (
     <div className={`careerfit-assistant ${panelIsOpen ? "is-open" : "is-closed"} ${isExpanded ? "is-expanded" : ""}`} dir={isArabic ? "rtl" : "ltr"} lang={isArabic ? "ar" : "en"}>
@@ -310,10 +619,23 @@ export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChan
             </div>
           </div>
           <div className="careerfit-assistant__messages" ref={messagesRef} aria-label={content.messagesLabel} aria-live="polite">
-            {messages.map(renderMessage)}
+            {visibleMessages.map(renderMessage)}
+            {isConversationForCurrentUser && (aiEnabled || hasAuthenticatedSession) && isAiPending ? (
+              <article
+                className="careerfit-assistant__message careerfit-assistant__message--assistant careerfit-assistant__typing"
+                aria-label={content.assistantLabel}
+              >
+                <span className="careerfit-assistant__message-label">{content.assistantLabel}</span>
+                <span className="careerfit-assistant__typing-dots" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </article>
+            ) : null}
           </div>
-          <div className={`careerfit-assistant__quick-actions ${hasInteracted ? "is-compact" : ""}`} aria-label={content.quickActionsLabel}>
-            {!hasInteracted ? <div className="careerfit-assistant__primary-suggestions">
+          <div className={`careerfit-assistant__quick-actions ${hasVisibleInteraction ? "is-compact" : ""}`} aria-label={content.quickActionsLabel}>
+            {!hasVisibleInteraction ? <div className="careerfit-assistant__primary-suggestions">
               {primaryActions.map((action) => <button type="button" key={action.id} onClick={() => handleQuickAction(action.id)}>{action.label}</button>)}
               <button type="button" className="careerfit-assistant__suggestion-toggle" onClick={() => setSuggestionsOpen((open) => !open)} aria-expanded={suggestionsOpen}>
                 {content.moreLabel}
@@ -321,15 +643,26 @@ export default function CareerFitAssistant({ language = "ar", isOpen, onOpenChan
             </div> : <button type="button" className="careerfit-assistant__suggestion-toggle" onClick={() => setSuggestionsOpen((open) => !open)} aria-expanded={suggestionsOpen}>
               {content.suggestionsLabel}
             </button>}
-            {suggestionsOpen ? <div className="careerfit-assistant__suggestion-menu">
+            {isConversationForCurrentUser && suggestionsOpen ? <div className="careerfit-assistant__suggestion-menu">
               {visibleMenuActions.map((action) => <button type="button" key={action.id} onClick={() => handleQuickAction(action.id)}>{action.label}</button>)}
             </div> : null}
           </div>
           <form className="careerfit-assistant__composer" onSubmit={handleSubmit}>
             <label className="sr-only" htmlFor={`${panelId}-input`}>{content.inputLabel}</label>
-            <input id={`${panelId}-input`} type="text" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={content.inputPlaceholder} />
-            <button type="submit" disabled={!draft.trim()}>{content.sendLabel}</button>
+            <input id={`${panelId}-input`} type="text" value={visibleDraft} onChange={(event) => setDraft(event.target.value)} placeholder={content.inputPlaceholder} maxLength={1000} />
+            <button type="submit" disabled={!visibleDraft.trim() || isAiPending}>{content.sendLabel}</button>
           </form>
+          <div className="careerfit-assistant__composer-meta" aria-live="polite">
+            <span dir="ltr">{visibleDraft.length} / 1000</span>
+            {!aiEnabled && hasAuthenticatedSession ? <span>{authCopy.testingNotice}</span> : null}
+            {!aiEnabled && hasAuthenticatedSession && remainingMessages !== null ? <span>{authCopy.remaining(remainingMessages)}</span> : null}
+            {!aiEnabled && authenticatedUser?.id && aiAccessRequestStatus === "pending" ? <span>{aiAccessRequestSubmitted ? authCopy.requestSubmitted : authCopy.requestPending}</span> : null}
+            {!aiEnabled && authenticatedUser?.id && aiAccessRequestStatus === "rejected" ? <span>{authCopy.requestRejected}</span> : null}
+            {showAiAccessRequest ? <button type="button" className="careerfit-assistant__access-request" onClick={requestAiAccess} disabled={isAiAccessRequestSubmitting}>{isAiAccessRequestSubmitting ? authCopy.requestSubmitting : authCopy.requestAccess}</button> : null}
+            {aiAccessRequestError ? <span className="careerfit-assistant__access-request-error">{aiAccessRequestError}</span> : null}
+            {!aiEnabled && hasAuthenticatedSession ? <button type="button" className="careerfit-assistant__sign-out" onClick={handleUserSignOut}>{authCopy.signOut}</button> : null}
+            {signOutError ? <span className="careerfit-assistant__sign-out-error">{signOutError}</span> : null}
+          </div>
           </section>
         </>
       ) : null}

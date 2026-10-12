@@ -10,6 +10,16 @@ const dir=await mkdtemp(path.join(os.tmpdir(),"cf-integration-")); const file=pa
 const base={...s.DEFAULT_SEMANTIC_VALIDATION_CONFIGURATION,applicationEnabled:true,careerProfileEnabled:true,cacheEnabled:false,timeoutMs:20,supportOperationTimeoutMs:20};
 const app=s.buildSemanticPayload("application",{targetRole:"QA",relevantExperience:"I completed practical QA testing projects for web applications."});
 const profile=s.buildSemanticPayload("career_profile",{professionalSummary:"I am a QA graduate seeking practical software testing work.",targetRoles:["QA Engineer"],skills:["Manual testing","SQL"],experienceSummary:"I tested student web projects and documented reproducible defects.",educationSummary:"I completed a software testing diploma and practical labs."});
+assert.equal(profile.ok,true);
+const openAiBundle=await build({entryPoints:[path.resolve("supabase/functions/_shared/semanticValidationOpenAICore.ts")],bundle:true,format:"esm",platform:"node",write:false});const openAiFile=path.join(dir,"openai.mjs");await writeFile(openAiFile,openAiBundle.outputFiles[0].text);const {buildOpenAISemanticProviderInput}=await import(pathToFileURL(openAiFile).href);
+const providerInput=buildOpenAISemanticProviderInput({surface:profile.payload.surface,validatorVersion:`v1:${profile.payload.contractVersion}`,contractVersion:profile.payload.contractVersion,providerId:"openai_responses",providerModel:"gpt-5-mini",fields:profile.payload.fields});
+assert.equal(providerInput.semantic_contract_version,"career-profile-semantic-policy-v2");
+assert.equal(providerInput.fields.length,5);
+assert.ok(providerInput.fields.every((field)=>field.policy),"Career Profile provider input must attach each field policy");
+assert.equal(providerInput.fields.some((field)=>"email" in field || "userId" in field || "fullName" in field),false,"provider input must remain free of identity fields");
+assert.equal(app.ok,true);
+const applicationProviderInput=buildOpenAISemanticProviderInput({surface:app.payload.surface,validatorVersion:"v1",contractVersion:app.payload.contractVersion,providerId:"openai_responses",providerModel:"gpt-5-mini",fields:app.payload.fields});
+assert.equal(applicationProviderInput.fields.every((field)=>!("policy" in field)),true,"Application provider input must remain supported without field policies");
 function repo(mode){const events=[];return {events,async readConfiguration(){return {...base,mode}},async readCache(){return null},async writeCache(){},async consumeProviderBudget(){return {allowed:true}},async recordEvent(e){events.push(e)}}}
 function fake(result){return {calls:0,async validate(request){this.calls++;return {result:{results:request.fields.map((f,i)=>({key:f.key,state:result,reason_code:result==="invalid"?"wrong_field_semantics":null}))}}}}}
 async function draftBoundary(mode,result,{limited=false}={}){let persisted=0,email=0;const provider=fake(result);if(limited)return {provider,persisted,email,reply:"draft_rate_limited"};const d=await s.orchestrateSemanticValidation(app,{repository:repo(mode),provider,cacheHmacSecret:"x"});if(d.blockedFieldKeys.length)return {provider,persisted,email,reply:"semantic_invalid"};persisted++;email++;return {provider,persisted,email,reply:"ok",stored:{targetRole:"QA"}}}

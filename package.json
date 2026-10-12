@@ -6,6 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test:professional-data": "node src/lib/professionalDataValidation.test.mjs",
+    "test:application-parser": "node src/lib/applicationSubmissionParity.test.mjs",
+    "test:application-registry": "node src/lib/applicationSubmissionRegistry.test.mjs",
+    "test:semantic-validation": "node supabase/functions/_shared/semanticValidationPhase2.test.mjs",
+    "test:semantic-integration": "node supabase/functions/_shared/semanticIntegration.test.mjs",
+    "test:semantic-provider-eval": "node supabase/functions/_shared/semanticProviderQualityEvaluation.test.mjs",
+    "eval:semantic-provider": "node supabase/functions/_shared/semanticProviderQualityEvaluation.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

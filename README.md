@@ -26,15 +26,13 @@ The function accepts `POST` JSON in this shape:
 
 `language` is limited to `ar` or `en`. `history` is optional, limited to 12 entries, and only accepts `user` and `assistant` roles. Messages and history content are limited to 2,000 characters. Invalid requests return `{ "ok": false, "error": "invalid_request" }`.
 
-Configure the provider only as Supabase Edge Function secrets. Never put these values in Vite variables, frontend source, or Git:
+Configure OpenAI only as a Supabase Edge Function secret. Never put this value in Vite variables, frontend source, or Git:
 
 ```sh
 npx supabase secrets set AI_API_KEY="your-provider-key"
-npx supabase secrets set AI_API_URL="https://provider.example/v1/chat/completions"
-npx supabase secrets set AI_MODEL="provider-model-name"
 ```
 
-The provider adapter currently expects an OpenAI-compatible chat-completions response. Replace only `callAIProvider()` if the provider changes; the frontend request and response contract remain stable.
+The provider adapter uses OpenAI's Responses API at `https://api.openai.com/v1/responses` with the development model `gpt-5-mini`, a 400-token output limit, and `store: false`. Replace only `callAIProvider()` if the provider changes; the frontend request and response contract remain stable.
 
 Deploy the function with:
 

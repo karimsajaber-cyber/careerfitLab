@@ -1,11 +1,41 @@
-import { useState } from "react";
-import { supabase } from "../lib/supabase";
+import { useEffect, useState } from "react";
+import { getAdminSupabase } from "../lib/supabase";
 
 export default function AdminLogin({ onAuthenticated }) {
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [error, setError] = useState("");
     const [isLoading, setIsLoading] = useState(false);
+    const [isSessionChecking, setIsSessionChecking] = useState(true);
+
+    useEffect(() => {
+        let isActive = true;
+
+        const restoreAdminSession = async () => {
+            const adminSupabase = getAdminSupabase();
+            if (!adminSupabase) {
+                if (isActive) setIsSessionChecking(false);
+                return;
+            }
+
+            try {
+                const { data, error: sessionError } = await adminSupabase.auth.getSession();
+                if (sessionError || !data.session?.user) return;
+
+                const { data: isAdmin, error: adminError } = await adminSupabase.rpc("is_admin");
+                if (!adminError && isAdmin === true && isActive) {
+                    onAuthenticated(data.session.user);
+                }
+            } finally {
+                if (isActive) setIsSessionChecking(false);
+            }
+        };
+
+        restoreAdminSession();
+        return () => {
+            isActive = false;
+        };
+    }, [onAuthenticated]);
 
     const handleSubmit = async (event) => {
         event.preventDefault();
@@ -16,7 +46,9 @@ export default function AdminLogin({ onAuthenticated }) {
         setIsLoading(true);
 
         try {
-            const { data, error: loginError } = await supabase.auth.signInWithPassword({
+            const adminSupabase = getAdminSupabase();
+            if (!adminSupabase) throw new Error("Supabase is not configured");
+            const { data, error: loginError } = await adminSupabase.auth.signInWithPassword({
                 email: email.trim(),
                 password,
             });
@@ -25,15 +57,15 @@ export default function AdminLogin({ onAuthenticated }) {
                 throw loginError;
             }
 
-            const { data: isAdmin, error: adminError } = await supabase.rpc("is_admin");
+            const { data: isAdmin, error: adminError } = await adminSupabase.rpc("is_admin");
 
             if (adminError) {
-                await supabase.auth.signOut();
+                await adminSupabase.auth.signOut();
                 throw adminError;
             }
 
             if (!isAdmin) {
-                await supabase.auth.signOut();
+                await adminSupabase.auth.signOut();
                 setError("هذا الحساب غير مخوّل بالدخول إلى لوحة الإدارة.");
                 return;
             }
@@ -46,6 +78,20 @@ export default function AdminLogin({ onAuthenticated }) {
             setIsLoading(false);
         }
     };
+
+    if (isSessionChecking) {
+        return (
+            <main className="admin-login-page">
+                <div className="admin-login-card admin-login-card--checking" aria-live="polite">
+                    <div className="admin-login-heading">
+                        <span>CareerFit Lab</span>
+                        <h1>لوحة الإدارة</h1>
+                        <p>جارٍ التحقق من صلاحية الدخول.</p>
+                    </div>
+                </div>
+            </main>
+        );
+    }
 
     return (
         <main className="admin-login-page">
