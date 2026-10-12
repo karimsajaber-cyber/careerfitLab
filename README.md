@@ -39,3 +39,9 @@ Deploy the function with:
 ```sh
 npx supabase functions deploy careerfit-assistant
 ```
+
+## Developer Setup
+
+New contributors should start here:
+
+[Developer Onboarding Guide](./DEVELOPER_ONBOARDING.md)
